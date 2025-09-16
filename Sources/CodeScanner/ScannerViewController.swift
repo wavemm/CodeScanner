@@ -179,6 +179,13 @@ extension CodeScannerView {
 
         override public func viewDidLoad() {
             super.viewDidLoad()
+            codeScannerLogger?.log(
+                level: .info,
+                message: "ScannerViewController viewDidLoad started",
+                file: #file,
+                function: #function,
+                line: #line
+            )
             self.addOrientationDidChangeObserver()
             self.setBackgroundColor()
             self.handleCameraPermission()
@@ -217,12 +224,34 @@ extension CodeScannerView {
         }
       
         private func setupSession() {
+            codeScannerLogger?.log(
+                level: .info,
+                message: "Setting up capture session",
+                file: #file,
+                function: #function,
+                line: #line
+            )
+
             guard let captureSession = captureSession else {
+                codeScannerLogger?.log(
+                    level: .error,
+                    message: "Capture session is nil, cannot setup session",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
                 return
             }
-            
+
             if previewLayer == nil {
                 previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
+                codeScannerLogger?.log(
+                    level: .info,
+                    message: "Created preview layer",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
             }
 
             previewLayer.frame = view.layer.bounds
@@ -233,19 +262,73 @@ extension CodeScannerView {
             reset()
 
             if (captureSession.isRunning == false) {
+                codeScannerLogger?.log(
+                    level: .info,
+                    message: "Starting capture session",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
                 DispatchQueue.global(qos: .userInteractive).async {
                     self.captureSession?.startRunning()
+                    DispatchQueue.main.async {
+                        codeScannerLogger?.log(
+                            level: .info,
+                            message: "Capture session started running: \(self.captureSession?.isRunning ?? false)",
+                            file: #file,
+                            function: #function,
+                            line: #line
+                        )
+                    }
                 }
+            } else {
+                codeScannerLogger?.log(
+                    level: .info,
+                    message: "Capture session already running",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
             }
         }
 
         private func handleCameraPermission() {
-            switch AVCaptureDevice.authorizationStatus(for: .video) {
+            let authStatus = AVCaptureDevice.authorizationStatus(for: .video)
+            codeScannerLogger?.log(
+                level: .info,
+                message: "Camera permission status: \(authStatus.rawValue)",
+                file: #file,
+                function: #function,
+                line: #line
+            )
+
+            switch authStatus {
                 case .restricted:
+                    codeScannerLogger?.log(
+                        level: .error,
+                        message: "Camera access restricted",
+                        file: #file,
+                        function: #function,
+                        line: #line
+                    )
                     break
                 case .denied:
+                    codeScannerLogger?.log(
+                        level: .error,
+                        message: "Camera permission denied",
+                        file: #file,
+                        function: #function,
+                        line: #line
+                    )
                     self.didFail(reason: .permissionDenied)
                 case .notDetermined:
+                    codeScannerLogger?.log(
+                        level: .info,
+                        message: "Camera permission not determined, requesting access",
+                        file: #file,
+                        function: #function,
+                        line: #line
+                    )
                     self.requestCameraAccess {
                         self.setupCaptureDevice()
                         DispatchQueue.main.async {
@@ -253,16 +336,37 @@ extension CodeScannerView {
                         }
                     }
                 case .authorized:
+                    codeScannerLogger?.log(
+                        level: .info,
+                        message: "Camera permission authorized, setting up capture device",
+                        file: #file,
+                        function: #function,
+                        line: #line
+                    )
                     self.setupCaptureDevice()
                     self.setupSession()
-                    
+
                 default:
+                    codeScannerLogger?.log(
+                        level: .error,
+                        message: "Unknown camera permission status: \(authStatus.rawValue)",
+                        file: #file,
+                        function: #function,
+                        line: #line
+                    )
                     break
             }
         }
 
         private func requestCameraAccess(completion: (() -> Void)?) {
             AVCaptureDevice.requestAccess(for: .video) { [weak self] status in
+                codeScannerLogger?.log(
+                    level: status ? .info : .error,
+                    message: "Camera access request result: \(status)",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
                 guard status else {
                     self?.didFail(reason: .permissionDenied)
                     return
@@ -285,24 +389,75 @@ extension CodeScannerView {
         }
       
         private func setupCaptureDevice() {
+            codeScannerLogger?.log(
+                level: .info,
+                message: "Setting up capture device",
+                file: #file,
+                function: #function,
+                line: #line
+            )
+
             captureSession = AVCaptureSession()
 
             guard let videoCaptureDevice = parentView.videoCaptureDevice ?? fallbackVideoCaptureDevice else {
+                codeScannerLogger?.log(
+                    level: .error,
+                    message: "No video capture device available",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
                 return
             }
+
+            codeScannerLogger?.log(
+                level: .info,
+                message: "Using video capture device: \(videoCaptureDevice.localizedName)",
+                file: #file,
+                function: #function,
+                line: #line
+            )
 
             let videoInput: AVCaptureDeviceInput
 
             do {
                 videoInput = try AVCaptureDeviceInput(device: videoCaptureDevice)
+                codeScannerLogger?.log(
+                    level: .info,
+                    message: "Successfully created video input",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
             } catch {
+                codeScannerLogger?.log(
+                    level: .error,
+                    message: "Failed to create video input: \(error.localizedDescription)",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
                 didFail(reason: .initError(error))
                 return
             }
 
             if (captureSession!.canAddInput(videoInput)) {
                 captureSession!.addInput(videoInput)
+                codeScannerLogger?.log(
+                    level: .info,
+                    message: "Successfully added video input to capture session",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
             } else {
+                codeScannerLogger?.log(
+                    level: .error,
+                    message: "Cannot add video input to capture session",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
                 didFail(reason: .badInput)
                 return
             }
@@ -313,7 +468,21 @@ extension CodeScannerView {
                 captureSession?.addOutput(photoOutput)
                 metadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
                 metadataOutput.metadataObjectTypes = parentView.codeTypes
+                codeScannerLogger?.log(
+                    level: .info,
+                    message: "Successfully added metadata output to capture session. Code types: \(parentView.codeTypes)",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
             } else {
+                codeScannerLogger?.log(
+                    level: .error,
+                    message: "Cannot add metadata output to capture session",
+                    file: #file,
+                    function: #function,
+                    line: #line
+                )
                 didFail(reason: .badOutput)
                 return
             }
@@ -508,6 +677,13 @@ extension CodeScannerView {
         }
 
         func didFail(reason: ScanError) {
+            codeScannerLogger?.log(
+                level: .error,
+                message: "Scanner failed with reason: \(reason)",
+                file: #file,
+                function: #function,
+                line: #line
+            )
             DispatchQueue.main.async {
                 self.parentView.completion(.failure(reason))
             }

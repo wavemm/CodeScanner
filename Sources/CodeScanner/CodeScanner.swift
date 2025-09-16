@@ -9,9 +9,14 @@
 import AVFoundation
 import SwiftUI
 
+public enum CodeScannerLogLevel {
+    case info
+    case error
+}
+
 public protocol CodeScannerLoggerProtocol {
     func log(
-        level: String,
+        level: CodeScannerLogLevel,
         message: String,
         file: String,
         function: String,

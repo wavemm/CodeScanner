@@ -9,6 +9,18 @@
 import AVFoundation
 import SwiftUI
 
+public protocol CodeScannerLoggerProtocol {
+    func log(
+        level: String,
+        message: String,
+        file: String,
+        function: String,
+        line: UInt
+    )
+}
+
+public var codeScannerLogger: CodeScannerLoggerProtocol?
+
 /// An enum describing the ways CodeScannerView can hit scanning problems.
 public enum ScanError: Error {
     /// The camera could not be accessed.

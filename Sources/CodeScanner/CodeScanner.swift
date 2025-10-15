@@ -24,6 +24,18 @@ public protocol CodeScannerLoggerProtocol {
     )
 }
 
+extension CodeScannerLoggerProtocol {
+    func log(
+        level: CodeScannerLogLevel,
+        message: String,
+        file: String = #file,
+        function: String = #function,
+        line: UInt = #line
+    ) {
+        log(level: level, message: message, file: file, function: function, line: line)
+    }
+}
+
 public var codeScannerLogger: CodeScannerLoggerProtocol?
 
 /// An enum describing the ways CodeScannerView can hit scanning problems.

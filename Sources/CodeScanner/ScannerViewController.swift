@@ -146,6 +146,11 @@ extension CodeScannerView {
         var captureSession: AVCaptureSession?
         var previewLayer: AVCaptureVideoPreviewLayer!
         let fallbackVideoCaptureDevice = AVCaptureDevice.default(for: .video)
+        private var activeVideoCaptureDevice: AVCaptureDevice?
+        private var previewLayerAdded = false
+
+        // Dedicated serial queue for all AVCaptureSession operations (thread safety)
+        private let sessionQueue = DispatchQueue(label: "com.codescanner.session")
 
         private lazy var viewFinder: UIImageView? = {
             guard let image = UIImage(named: "viewfinder", in: .module, with: nil) else {
@@ -179,13 +184,7 @@ extension CodeScannerView {
 
         override public func viewDidLoad() {
             super.viewDidLoad()
-            codeScannerLogger?.log(
-                level: .info,
-                message: "ScannerViewController viewDidLoad started",
-                file: #file,
-                function: #function,
-                line: #line
-            )
+            codeScannerLogger?.log(level: .info, message: "ScannerViewController viewDidLoad started")
             self.addOrientationDidChangeObserver()
             self.setBackgroundColor()
             self.handleCameraPermission()
@@ -220,158 +219,94 @@ extension CodeScannerView {
         override public func viewWillAppear(_ animated: Bool) {
             super.viewWillAppear(animated)
 
-            setupSession()
-        }
-      
-        private func setupSession() {
-            codeScannerLogger?.log(
-                level: .info,
-                message: "Setting up capture session",
-                file: #file,
-                function: #function,
-                line: #line
-            )
+            codeScannerLogger?.log(level: .info, message: "viewWillAppear - captureSession exists: \(captureSession != nil)")
 
-            guard let captureSession = captureSession else {
-                codeScannerLogger?.log(
-                    level: .error,
-                    message: "Capture session is nil, cannot setup session",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
-                return
-            }
-
-            if previewLayer == nil {
-                previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
-                codeScannerLogger?.log(
-                    level: .info,
-                    message: "Created preview layer",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
-            }
-
-            previewLayer.frame = view.layer.bounds
-            previewLayer.videoGravity = .resizeAspectFill
-            view.layer.addSublayer(previewLayer)
-            addviewfinder()
-
-            reset()
-
-            if (captureSession.isRunning == false) {
-                codeScannerLogger?.log(
-                    level: .info,
-                    message: "Starting capture session",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
-                DispatchQueue.global(qos: .userInteractive).async {
-                    self.captureSession?.startRunning()
-                    DispatchQueue.main.async {
-                        codeScannerLogger?.log(
-                            level: .info,
-                            message: "Capture session started running: \(self.captureSession?.isRunning ?? false)",
-                            file: #file,
-                            function: #function,
-                            line: #line
-                        )
-                    }
+            // Only restart session if it was previously configured
+            // Initial setup happens in handleCameraPermission
+            sessionQueue.async { [weak self] in
+                guard let self = self, let session = self.captureSession else {
+                    codeScannerLogger?.log(level: .info, message: "viewWillAppear: Skipping - session not configured yet" )
+                    return
                 }
-            } else {
-                codeScannerLogger?.log(
-                    level: .info,
-                    message: "Capture session already running",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
+
+                if !session.isRunning {
+                    codeScannerLogger?.log(level: .info, message: "viewWillAppear: Restarting session" )
+                    self.startSession()
+                }
             }
         }
 
         private func handleCameraPermission() {
             let authStatus = AVCaptureDevice.authorizationStatus(for: .video)
-            codeScannerLogger?.log(
-                level: .info,
-                message: "Camera permission status: \(authStatus.rawValue)",
-                file: #file,
-                function: #function,
-                line: #line
-            )
+            codeScannerLogger?.log(level: .info, message: "Camera permission status: \(authStatus.rawValue)" )
 
             switch authStatus {
-                case .restricted:
-                    codeScannerLogger?.log(
-                        level: .error,
-                        message: "Camera access restricted",
-                        file: #file,
-                        function: #function,
-                        line: #line
-                    )
-                    break
-                case .denied:
-                    codeScannerLogger?.log(
-                        level: .error,
-                        message: "Camera permission denied",
-                        file: #file,
-                        function: #function,
-                        line: #line
-                    )
-                    self.didFail(reason: .permissionDenied)
-                case .notDetermined:
-                    codeScannerLogger?.log(
-                        level: .info,
-                        message: "Camera permission not determined, requesting access",
-                        file: #file,
-                        function: #function,
-                        line: #line
-                    )
-                    self.requestCameraAccess {
-                        self.setupCaptureDevice()
+            case .restricted:
+                break
+
+            case .denied:
+                self.didFail(reason: .permissionDenied)
+
+            case .notDetermined:
+                // Suspend session queue to prevent operations until permission resolved
+                sessionQueue.suspend()
+
+                codeScannerLogger?.log(level: .info, message: "Suspended session queue until permission resolved" )
+
+                self.requestCameraAccess { [weak self] granted in
+                    guard let self else {
+                        self?.sessionQueue.resume()
+                        return
+                    }
+
+                    if granted {
+                        self.sessionQueue.async {
+                            self.setupCaptureDevice()
+                            DispatchQueue.main.async {
+                                self.setupPreviewLayer()
+                            }
+                            self.startSession()
+                        }
+                    } else {
                         DispatchQueue.main.async {
-                            self.setupSession()
+                            self.didFail(reason: .permissionDenied)
                         }
                     }
-                case .authorized:
-                    codeScannerLogger?.log(
-                        level: .info,
-                        message: "Camera permission authorized, setting up capture device",
-                        file: #file,
-                        function: #function,
-                        line: #line
-                    )
-                    self.setupCaptureDevice()
-                    self.setupSession()
 
-                default:
-                    codeScannerLogger?.log(
-                        level: .error,
-                        message: "Unknown camera permission status: \(authStatus.rawValue)",
-                        file: #file,
-                        function: #function,
-                        line: #line
-                    )
-                    break
+                    // Resume session queue
+                    self.sessionQueue.resume()
+
+                    codeScannerLogger?.log(level: .info, message: "Resumed session queue after permission response")
+                }
+
+            case .authorized:
+                codeScannerLogger?.log(level: .info, message: "Camera permission authorized, setting up capture device")
+
+                // Setup on session queue
+                sessionQueue.async { [weak self] in
+                    guard let self = self else { return }
+
+                    self.setupCaptureDevice()
+
+                    // Setup preview layer on main thread
+                    DispatchQueue.main.async {
+                        self.setupPreviewLayer()
+                    }
+
+                    // Start session on session queue
+                    self.startSession()
+                }
+
+            default:
+                codeScannerLogger?.log(level: .error, message: "Unknown camera permission status: \(authStatus.rawValue)")
+                break
             }
         }
 
-        private func requestCameraAccess(completion: (() -> Void)?) {
-            AVCaptureDevice.requestAccess(for: .video) { [weak self] status in
-                codeScannerLogger?.log(
-                    level: status ? .info : .error,
-                    message: "Camera access request result: \(status)",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
-                guard status else {
-                    self?.didFail(reason: .permissionDenied)
-                    return
-                }
-                completion?()
+        private func requestCameraAccess(completion: @escaping (Bool) -> Void) {
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                codeScannerLogger?.log(level: granted ? .info : .error, message: "Camera access request result: \(granted)")
+                completion(granted)
             }
         }
       
@@ -383,108 +318,216 @@ extension CodeScannerView {
                 object: nil
             )
         }
-      
+
+        private func addSessionObservers() {
+            // Monitor runtime errors
+            NotificationCenter.default.addObserver(
+                forName: .AVCaptureSessionRuntimeError,
+                object: captureSession,
+                queue: nil
+            ) { [weak self] notification in
+                guard let error = notification.userInfo?[AVCaptureSessionErrorKey] as? AVError else {
+                    return
+                }
+
+                codeScannerLogger?.log(level: .error, message: "AVCaptureSession runtime error: \(error.localizedDescription) (code: \(error.code.rawValue))")
+
+                // Report error to client - let them decide how to handle it
+                DispatchQueue.main.async {
+                    self?.didFail(reason: .initError(error))
+                }
+            }
+
+            // Monitor interruptions
+            NotificationCenter.default.addObserver(
+                forName: .AVCaptureSessionWasInterrupted,
+                object: captureSession,
+                queue: nil
+            ) { notification in
+                if let reason = notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? AVCaptureSession.InterruptionReason {
+                    codeScannerLogger?.log(level: .info, message: "AVCaptureSession was interrupted - reason: \(reason.rawValue)")
+                } else {
+                    codeScannerLogger?.log(level: .info, message: "AVCaptureSession was interrupted")
+                }
+            }
+
+            NotificationCenter.default.addObserver(
+                forName: .AVCaptureSessionInterruptionEnded,
+                object: captureSession,
+                queue: nil
+            ) { notification in
+                codeScannerLogger?.log(level: .info, message: "AVCaptureSession interruption ended")
+            }
+        }
+
         private func setBackgroundColor(_ color: UIColor = .black) {
             view.backgroundColor = color
         }
-      
-        private func setupCaptureDevice() {
-            codeScannerLogger?.log(
-                level: .info,
-                message: "Setting up capture device",
-                file: #file,
-                function: #function,
-                line: #line
-            )
 
-            captureSession = AVCaptureSession()
+        private func setupCaptureDevice() {
+            codeScannerLogger?.log(level: .info, message: "Setting up capture device")
 
             guard let videoCaptureDevice = parentView.videoCaptureDevice ?? fallbackVideoCaptureDevice else {
-                codeScannerLogger?.log(
-                    level: .error,
-                    message: "No video capture device available",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
+                codeScannerLogger?.log(level: .error, message: "No video capture device available")
+                DispatchQueue.main.async {
+                    self.didFail(reason: .badInput)
+                }
                 return
             }
 
-            codeScannerLogger?.log(
-                level: .info,
-                message: "Using video capture device: \(videoCaptureDevice.localizedName)",
-                file: #file,
-                function: #function,
-                line: #line
-            )
+            // Store the active device for torch control
+            activeVideoCaptureDevice = videoCaptureDevice
 
+            codeScannerLogger?.log(level: .info, message: "Using video capture device: \(videoCaptureDevice.localizedName)")
+
+            captureSession = AVCaptureSession()
+
+            captureSession?.beginConfiguration()
+
+            codeScannerLogger?.log(level: .info, message: "Beginning capture session configuration")
+
+            // Create video input
             let videoInput: AVCaptureDeviceInput
 
             do {
                 videoInput = try AVCaptureDeviceInput(device: videoCaptureDevice)
-                codeScannerLogger?.log(
-                    level: .info,
-                    message: "Successfully created video input",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
+                codeScannerLogger?.log(level: .info, message: "Successfully created video input")
             } catch {
-                codeScannerLogger?.log(
-                    level: .error,
-                    message: "Failed to create video input: \(error.localizedDescription)",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
-                didFail(reason: .initError(error))
+                codeScannerLogger?.log(level: .error, message: "Failed to create video input: \(error.localizedDescription)")
+                captureSession?.commitConfiguration()
+                DispatchQueue.main.async {
+                    self.didFail(reason: .initError(error))
+                }
                 return
             }
 
-            if (captureSession!.canAddInput(videoInput)) {
-                captureSession!.addInput(videoInput)
-                codeScannerLogger?.log(
-                    level: .info,
-                    message: "Successfully added video input to capture session",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
+            // Add video input
+            if captureSession?.canAddInput(videoInput) == true {
+                captureSession?.addInput(videoInput)
+                codeScannerLogger?.log(level: .info, message: "Successfully added video input to capture session")
             } else {
-                codeScannerLogger?.log(
-                    level: .error,
-                    message: "Cannot add video input to capture session",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
-                didFail(reason: .badInput)
+                codeScannerLogger?.log(level: .error, message: "Cannot add video input to capture session")
+                captureSession?.commitConfiguration()
+                DispatchQueue.main.async {
+                    self.didFail(reason: .badInput)
+                }
                 return
             }
-            let metadataOutput = AVCaptureMetadataOutput()
 
-            if (captureSession!.canAddOutput(metadataOutput)) {
-                captureSession!.addOutput(metadataOutput)
-                captureSession?.addOutput(photoOutput)
+            // Add metadata output
+            let metadataOutput = AVCaptureMetadataOutput()
+            if captureSession?.canAddOutput(metadataOutput) == true {
+                captureSession?.addOutput(metadataOutput)
                 metadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
                 metadataOutput.metadataObjectTypes = parentView.codeTypes
-                codeScannerLogger?.log(
-                    level: .info,
-                    message: "Successfully added metadata output to capture session. Code types: \(parentView.codeTypes)",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
+                codeScannerLogger?.log(level: .info, message: "Successfully added metadata output. Code types: \(parentView.codeTypes)")
             } else {
-                codeScannerLogger?.log(
-                    level: .error,
-                    message: "Cannot add metadata output to capture session",
-                    file: #file,
-                    function: #function,
-                    line: #line
-                )
-                didFail(reason: .badOutput)
+                codeScannerLogger?.log(level: .error, message: "Cannot add metadata output to capture session")
+                captureSession?.commitConfiguration()
+                DispatchQueue.main.async {
+                    self.didFail(reason: .badOutput)
+                }
                 return
+            }
+
+            // Add photo output
+            if captureSession?.canAddOutput(photoOutput) == true {
+                captureSession?.addOutput(photoOutput)
+            }
+
+            // Commit atomic configuration
+            captureSession?.commitConfiguration()
+
+            codeScannerLogger?.log(level: .info, message: "Committed capture session configuration")
+
+            // Add observers after session is configured
+            DispatchQueue.main.async {
+                self.addSessionObservers()
+            }
+        }
+
+        private func setupPreviewLayer() {
+            // MUST be called on main thread (UIKit requirement)
+            guard Thread.isMainThread else {
+                DispatchQueue.main.async { self.setupPreviewLayer() }
+                return
+            }
+
+            codeScannerLogger?.log(level: .info, message: "Setting up preview layer on main thread")
+
+            guard let captureSession else {
+                codeScannerLogger?.log(level: .error, message: "Cannot setup preview layer: captureSession is nil")
+                return
+            }
+
+            // Create preview layer if needed
+            if previewLayer == nil {
+                previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
+                codeScannerLogger?.log(level: .info, message: "Created preview layer")
+            }
+
+            previewLayer.frame = view.layer.bounds
+            previewLayer.videoGravity = .resizeAspectFill
+
+            // Add preview layer if not already added
+            if !previewLayerAdded {
+                view.layer.addSublayer(previewLayer)
+                previewLayerAdded = true
+                codeScannerLogger?.log(level: .info, message: "Added preview layer to view hierarchy")
+            }
+
+            addviewfinder()
+            reset()
+        }
+
+        private func startSession() {
+            codeScannerLogger?.log(level: .info, message: "Starting capture session on session queue")
+
+            guard let session = captureSession else {
+                codeScannerLogger?.log(level: .error, message: "Cannot start: session is nil")
+                DispatchQueue.main.async {
+                    self.didFail(reason: .badInput)
+                }
+                return
+            }
+
+            // Validate configuration
+            guard session.inputs.count > 0 else {
+                codeScannerLogger?.log(level: .error, message: "Cannot start: no inputs configured (count: 0)")
+                DispatchQueue.main.async {
+                    self.didFail(reason: .badInput)
+                }
+                return
+            }
+
+            guard session.outputs.count > 0 else {
+                codeScannerLogger?.log(level: .error, message: "Cannot start: no outputs configured (count: 0)")
+                DispatchQueue.main.async {
+                    self.didFail(reason: .badOutput)
+                }
+                return
+            }
+
+            guard !session.isRunning else {
+                codeScannerLogger?.log(level: .info, message: "Session already running")
+                return
+            }
+
+            // Log configuration before starting
+            codeScannerLogger?.log(level: .info, message: "Starting session - inputs: \(session.inputs.count), outputs: \(session.outputs.count)")
+
+            // Start on session queue (blocking call)
+            session.startRunning()
+
+            // IMPORTANT: Check isRunning on MAIN thread (non-atomic property)
+            DispatchQueue.main.async {
+                let isRunning = self.captureSession?.isRunning ?? false
+                codeScannerLogger?.log(level: isRunning ? .info : .error, message: "Session started, isRunning: \(isRunning)")
+
+                if !isRunning {
+                    codeScannerLogger?.log(level: .error, message: "Session failed to start - interrupted: \(session.isInterrupted)")
+                    self.didFail(reason: .badInput)
+                }
             }
         }
 
@@ -504,9 +547,15 @@ extension CodeScannerView {
         override public func viewDidDisappear(_ animated: Bool) {
             super.viewDidDisappear(animated)
 
-            if (captureSession?.isRunning == true) {
-                DispatchQueue.global(qos: .userInteractive).async {
-                    self.captureSession?.stopRunning()
+            // Stop session on session queue (thread safety)
+            sessionQueue.async { [weak self] in
+                guard let self, let session = self.captureSession else {
+                    return
+                }
+
+                if session.isRunning {
+                    codeScannerLogger?.log(level: .info, message: "Stopping capture session in viewDidDisappear")
+                    session.stopRunning()
                 }
             }
 
@@ -585,22 +634,25 @@ extension CodeScannerView {
         #endif
         
         func updateViewController(isTorchOn: Bool, isGalleryPresented: Bool, isManualCapture: Bool, isManualSelect: Bool) {
-            if let backCamera = AVCaptureDevice.default(for: AVMediaType.video),
-               backCamera.hasTorch
-            {
-                try? backCamera.lockForConfiguration()
-                backCamera.torchMode = isTorchOn ? .on : .off
-                backCamera.unlockForConfiguration()
-            }
-            
-            if isGalleryPresented && !isGalleryShowing {
-                openGallery()
-            }
-            
             #if !targetEnvironment(simulator)
+            // Use the active video capture device from the session instead of creating a new one
+            if let device = activeVideoCaptureDevice, device.hasTorch {
+                do {
+                    try device.lockForConfiguration()
+                    device.torchMode = isTorchOn ? .on : .off
+                    device.unlockForConfiguration()
+                } catch {
+                    codeScannerLogger?.log(level: .error, message: "Failed to configure torch: \(error.localizedDescription)")
+                }
+            }
+
             showManualCaptureButton(isManualCapture)
             showManualSelectButton(isManualSelect)
             #endif
+
+            if isGalleryPresented && !isGalleryShowing {
+                openGallery()
+            }
         }
         
         public func reset() {
@@ -677,13 +729,7 @@ extension CodeScannerView {
         }
 
         func didFail(reason: ScanError) {
-            codeScannerLogger?.log(
-                level: .error,
-                message: "Scanner failed with reason: \(reason)",
-                file: #file,
-                function: #function,
-                line: #line
-            )
+            codeScannerLogger?.log(level: .error, message: "Scanner failed with reason: \(reason)")
             DispatchQueue.main.async {
                 self.parentView.completion(.failure(reason))
             }
